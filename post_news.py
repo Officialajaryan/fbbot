@@ -1,6 +1,6 @@
 import os, re, random
 import feedparser
-from common import load_state, save_state, publish
+from common import load_state, save_state, publish, prepare, tg_preview
 
 POSTS_PER_RUN = 1
 FEEDS = {
@@ -27,7 +27,11 @@ def main():
         if done >= POSTS_PER_RUN:
             break
         try:
-            publish(e.title, clean(e.get("summary", "")) or e.title, name, e.link)
+            body = clean(e.get("summary", "")) or e.title
+            if os.environ.get("APPROVE_DAILY") == "1":
+                tg_preview(os.environ["TG_OWNER_ID"], prepare(e.title, body, e.link), state)
+            else:
+                publish(e.title, body, name, e.link)
             state["posted"].append(e.link)
             done += 1
             print("Posted:", e.title)
