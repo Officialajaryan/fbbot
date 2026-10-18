@@ -1,4 +1,4 @@
-import os, json, glob, re, io, functools
+import os, json, glob, re, io, functools, hashlib
 import qrcode
 import requests
 from PIL import Image, ImageDraw, ImageFont
@@ -20,12 +20,14 @@ def load_state():
     s.setdefault("posted", [])
     s.setdefault("replied", [])
     s.setdefault("tg_offset", 0)
+    s.setdefault("pending", {})
     return s
 
 
 def save_state(s):
     s["posted"] = s["posted"][-500:]
     s["replied"] = s["replied"][-2000:]
+    s["pending"] = dict(list(s["pending"].items())[-50:])
     with open(STATE_FILE, "w") as f:
         json.dump(s, f, indent=1)
 
@@ -266,7 +268,8 @@ def post_card(path, caption, source_url):
     return post_id
 
 
-def publish(title, body, source_name, url):
+def prepare(title, body, url):
+    """Make the card + caption without posting."""
     t = to_bangla(title, body)
     mode = os.environ.get("IMAGE_MODE", "ai")  # "ai" or "article"
     photo, is_ai = None, False
@@ -276,5 +279,46 @@ def publish(title, body, source_name, url):
     elif mode == "article":
         photo = get_article_image(url)
     path = make_card(t["headline"], t["subline"], photo, t.get("country", ""), ai_label=is_ai)
-    caption = f'{t["headline"]}\n\n{t["subline"]}'
-    return post_card(path, caption, url)
+    return {"path": path, "caption": f'{t["headline"]}\n\n{t["subline"]}', "url": url}
+
+
+def publish(title, body, source_name, url):
+    c = prepare(title, body, url)
+    return post_card(c["path"], c["caption"], c["url"])
+
+
+# ---------- Telegram approval ----------
+def _tg():
+    return f"https://api.telegram.org/bot{os.environ['TG_BOT_TOKEN']}"
+
+
+def tg_say(chat, text):
+    requests.post(f"{_tg()}/sendMessage", data={"chat_id": chat, "text": text}, timeout=20)
+
+
+def tg_preview(chat, c, state):
+    """Send card to Telegram with Post / Cancel buttons; remember it in state."""
+    pid = hashlib.md5(c["url"].encode()).hexdigest()[:10]
+    kb = {"inline_keyboard": [[
+        {"text": "✅ Post", "callback_data": f"ok:{pid}"},
+        {"text": "❌ Cancel", "callback_data": f"no:{pid}"},
+    ]]}
+    with open(c["path"], "rb") as f:
+        r = requests.post(
+            f"{_tg()}/sendPhoto",
+            data={"chat_id": chat, "caption": "Preview - post this?\nSource: " + c["url"],
+                  "reply_markup": json.dumps(kb)},
+            files={"photo": f}, timeout=60,
+        ).json()
+    fid = r["result"]["photo"][-1]["file_id"]
+    state["pending"][pid] = {"file_id": fid, "caption": c["caption"], "url": c["url"]}
+    return pid
+
+
+def tg_download(file_id, path="approved.png"):
+    info = requests.get(f"{_tg()}/getFile", params={"file_id": file_id}, timeout=30).json()
+    fp = info["result"]["file_path"]
+    data = requests.get(f"https://api.telegram.org/file/bot{os.environ['TG_BOT_TOKEN']}/{fp}", timeout=60).content
+    with open(path, "wb") as f:
+        f.write(data)
+    return path
