@@ -1,16 +1,10 @@
 import os, re
-from urllib.parse import urlparse
 import requests
 from bs4 import BeautifulSoup
-from common import load_state, save_state, publish
+from common import (load_state, save_state, prepare, post_card,
+                    tg_say, tg_preview, tg_download, _tg)
 
-BOT = os.environ["TG_BOT_TOKEN"]
 OWNER = str(os.environ["TG_OWNER_ID"])
-API = f"https://api.telegram.org/bot{BOT}"
-
-
-def say(chat, text):
-    requests.post(f"{API}/sendMessage", data={"chat_id": chat, "text": text}, timeout=20)
 
 
 def read_article(url):
@@ -23,15 +17,38 @@ def read_article(url):
 
     title = meta("og:title") or (soup.title.string if soup.title else "")
     paras = " ".join(p.get_text(" ", strip=True) for p in soup.find_all("p"))[:3000]
-    body = meta("og:description") + " " + paras
-    return title.strip(), body.strip()
+    return title.strip(), (meta("og:description") + " " + paras).strip()
+
+
+def handle_button(state, cb):
+    requests.post(f"{_tg()}/answerCallbackQuery", data={"callback_query_id": cb["id"]}, timeout=20)
+    action, _, pid = cb["data"].partition(":")
+    chat = str(cb["message"]["chat"]["id"])
+    item = state["pending"].pop(pid, None)
+    if not item:
+        tg_say(chat, "This one was already handled.")
+        return
+    if action == "no":
+        tg_say(chat, "Cancelled ❌")
+        return
+    try:
+        path = tg_download(item["file_id"])
+        post_card(path, item["caption"], item["url"])
+        tg_say(chat, "Posted to Facebook ✅")
+    except Exception as ex:
+        tg_say(chat, f"Failed: {ex}")
 
 
 def main():
     state = load_state()
-    r = requests.get(f"{API}/getUpdates", params={"offset": state["tg_offset"] + 1}, timeout=30).json()
+    r = requests.get(f"{_tg()}/getUpdates", params={"offset": state["tg_offset"] + 1}, timeout=30).json()
     for u in r.get("result", []):
         state["tg_offset"] = u["update_id"]
+        cb = u.get("callback_query")
+        if cb:
+            if str(cb["from"]["id"]) == OWNER:
+                handle_button(state, cb)
+            continue
         m = u.get("message") or {}
         chat = str(m.get("chat", {}).get("id", ""))
         if chat != OWNER:
@@ -42,11 +59,9 @@ def main():
         url = found[0]
         try:
             title, body = read_article(url)
-            src = urlparse(url).netloc.replace("www.", "")
-            publish(title, body, src, url)
-            say(chat, "Posted to Facebook ✅")
+            tg_preview(chat, prepare(title, body, url), state)
         except Exception as ex:
-            say(chat, f"Failed: {ex}")
+            tg_say(chat, f"Failed: {ex}")
     save_state(state)
 
 
