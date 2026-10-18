@@ -1,7 +1,7 @@
 """Daily "আজকের রেট" card: Mustafa BDT remittance rate + Mustafa gold rate.
 Same look as the news cards (dark card, QR code, BD + SG flags).
 Rates are read from https://www.mustafa.com.sg/ every run."""
-import os, re, sys
+import os, re, sys, time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -43,32 +43,81 @@ def money(x, dec=2):
 
 
 # ---------- scrape ----------
+MIRROR = "https://www.livepriceofgold.com/mustafa-gold-price.html"  # copy of Mustafa's rates
+
+
 def _num(m):
     return float(m.group(1).replace(",", ""))
 
 
-def fetch_rates():
-    html = requests.get(URL, headers=UA, timeout=40).text
-    text = BeautifulSoup(html, "html.parser").get_text(" ", strip=True)
-    text = re.sub(r"\s+", " ", text)
+def _page_text(url, tries=3, timeout=20):
+    last = None
+    for i in range(tries):
+        try:
+            r = requests.get(url, headers=UA, timeout=timeout)
+            r.raise_for_status()
+            return re.sub(r"\s+", " ", BeautifulSoup(r.text, "html.parser").get_text(" ", strip=True))
+        except Exception as e:
+            last = e
+            print(f"fetch {url} try {i + 1} failed: {e}")
+            time.sleep(3)
+    raise RuntimeError(f"cannot open {url}: {last}")
 
-    def find(pattern, name):
-        m = re.search(pattern, text, re.I)
-        if not m:
-            raise RuntimeError(f"Could not find {name} on mustafa.com.sg (page layout changed?)")
-        return _num(m)
 
-    bdt = find(r"Bangladesh Taka\s*(?:Todays?|Today's)?\s*Rate\s*([\d.,]+)", "BDT rate")
-    k22 = find(r"22K\s*-?\s*916\s*Jewellery\s*([\d.,]+)", "22K gold rate")
-    bar = find(r"24K\s*-?\s*999\s*Gold\s*Bar\s*100\s*g\s*([\d.,]+)", "24K gold bar rate")
+def _find(text, patterns, name):
+    for p in patterns:
+        m = re.search(p, text, re.I)
+        if m:
+            return _num(m)
+    raise RuntimeError(f"Could not find {name} (page layout changed?)")
+
+
+def _parse(text):
+    bdt = _find(text, [r"Bangladesh Taka\s*(?:Todays?|Today's)?\s*Rate\s*([\d.,]+)",
+                       r"Draft Rate:?\s*Bangladesh Taka\s*([\d.,]+)"], "BDT rate")
+    k22 = _find(text, [r"22K\s*-?\s*916\s*Jewellery\s*([\d.,]+)",
+                       r"22K Gold \(916\) Jewellery\s*([\d.,]+)"], "22K gold rate")
+    bar = _find(text, [r"24K\s*-?\s*999\s*Gold\s*Bar\s*100\s*g\s*([\d.,]+)",
+                       r"24K Gold Bar: 100 Gram \(999\)\s*([\d.,]+)"], "24K gold bar rate")
     k24 = bar / 100  # price per gram
-
     # sanity checks - never post nonsense
     if not 50 <= bdt <= 200:
         raise RuntimeError(f"BDT rate looks wrong: {bdt}")
     if not 50 <= k22 <= 600 or not 50 <= k24 <= 600:
         raise RuntimeError(f"Gold rate looks wrong: 22K={k22} 24K/g={k24}")
     return {"bdt": bdt, "k22": k22, "k24": k24}
+
+
+def _check_fresh(text):
+    """mirror page shows 'LAST UPDATE: dd-mm-yyyy' - refuse old data"""
+    m = re.search(r"LAST UPDATE\W*(\d{2})-(\d{2})-(\d{4})", text)
+    if m:
+        d = datetime(int(m.group(3)), int(m.group(2)), int(m.group(1)))
+        age = (datetime.now() - d).days
+        if age > 3:
+            raise RuntimeError(f"backup source is {age} days old")
+
+
+def fetch_rates():
+    errors = []
+    try:  # 1) Mustafa's own site (may block foreign servers like GitHub's)
+        r = _parse(_page_text(URL, tries=2, timeout=15))
+        r["source"] = "mustafa.com.sg"
+        r["url"] = URL
+        return r
+    except Exception as e:
+        errors.append(f"mustafa.com.sg: {e}")
+        print("Mustafa site failed, trying backup:", e)
+    try:  # 2) backup: live copy of the same Mustafa rates
+        text = _page_text(MIRROR)
+        _check_fresh(text)
+        r = _parse(text)
+        r["source"] = "Mustafa rates via livepriceofgold.com"
+        r["url"] = MIRROR
+        return r
+    except Exception as e:
+        errors.append(f"backup: {e}")
+    raise RuntimeError(" | ".join(errors))
 
 
 # ---------- card ----------
@@ -129,7 +178,7 @@ def make_rate_card(r, now, path="rate_card.png"):
     # small print
     line("রেট যেকোনো সময় কমবেশি হতে পারে।", 32, 1235, GREY)
     line("বিক্রির আগে দোকান বা এক্সচেঞ্জে রেট যাচাই করে নিন।", 32, 1285, GREY)
-    line(f"Source: mustafa.com.sg | Updated {now:%d %b %Y, %I:%M %p} SGT", 26, 1350, DIM)
+    line(f"Source: {r.get('source', 'mustafa.com.sg')} | {now:%d %b %Y, %I:%M %p} SGT", 26, 1350, DIM)
     img.save(path)
     return path
 
@@ -159,7 +208,7 @@ def main():
     path = make_rate_card(r, now)
     cap = caption(r, now)
     if os.environ.get("RATE_AUTOPOST", "true").lower() in ("1", "true", "yes"):
-        post_id = post_card(path, cap, URL)
+        post_id = post_card(path, cap, r.get("url", URL))
         print("Posted:", post_id)
         if owner and os.environ.get("TG_BOT_TOKEN"):
             try:
@@ -167,7 +216,7 @@ def main():
             except Exception:
                 pass
     else:  # only if RATE_AUTOPOST=false: Telegram ✅ Post / ❌ Cancel flow
-        tg_preview(owner, {"path": path, "caption": cap, "url": URL})
+        tg_preview(owner, {"path": path, "caption": cap, "url": r.get("url", URL)})
         print("Sent to Telegram for approval")
 
 
