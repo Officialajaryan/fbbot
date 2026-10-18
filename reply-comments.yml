@@ -1,0 +1,37 @@
+name: reply-comments
+on:
+  schedule:
+    - cron: "*/20 * * * *"
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: state
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: sudo apt-get update && sudo apt-get install -y fonts-noto-core fonts-dejavu-core libraqm0 libfribidi0
+      - run: pip install -r requirements.txt
+      - run: python reply_comments.py
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          FB_PAGE_ID: ${{ secrets.FB_PAGE_ID }}
+          FB_PAGE_TOKEN: ${{ secrets.FB_PAGE_TOKEN }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_OWNER_ID: ${{ secrets.TG_OWNER_ID }}
+          PAGE_NAME: ${{ secrets.PAGE_NAME }}
+          FB_PAGE_URL: ${{ secrets.FB_PAGE_URL }}
+      - name: Save state
+        run: |
+          git config user.name bot
+          git config user.email bot@users.noreply.github.com
+          git add state.json || true
+          git commit -m "state" || exit 0
+          git pull --rebase
+          git push
