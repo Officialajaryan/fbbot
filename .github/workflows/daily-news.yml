@@ -27,6 +27,7 @@ jobs:
           TG_OWNER_ID: ${{ secrets.TG_OWNER_ID }}
           PAGE_NAME: ${{ secrets.PAGE_NAME }}
           FB_PAGE_URL: ${{ secrets.FB_PAGE_URL }}
+          APPROVE_DAILY: ${{ secrets.APPROVE_DAILY }}
       - name: Save state
         run: |
           git config user.name bot
