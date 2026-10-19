@@ -32,47 +32,53 @@ def save_state(s):
         json.dump(s, f, indent=1)
 
 
-def ask_claude(system, user, max_tokens=700, json_mode=False):
-    """AI call. Order: Gemini (GEMINI_API_KEY) -> DeepSeek (DEEPSEEK_API_KEY) -> Claude."""
-    gkey = os.environ.get("GEMINI_API_KEY")
-    if gkey:
-        model = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
-        cfg = {"maxOutputTokens": max(max_tokens, 2048), "temperature": 0.3}
-        if json_mode:
-            cfg["responseMimeType"] = "application/json"
-        if "2.5-flash" in model:
-            cfg["thinkingConfig"] = {"thinkingBudget": 0}  # no hidden 'thinking' tokens, just the answer
-        r = requests.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-            headers={"x-goog-api-key": gkey},
-            json={
-                "systemInstruction": {"parts": [{"text": system}]},
-                "contents": [{"role": "user", "parts": [{"text": user}]}],
-                "generationConfig": cfg,
-            },
-            timeout=90,
-        )
-        if not r.ok:
-            raise RuntimeError(f"Gemini error {r.status_code}: {r.text[:300]}")
-        parts = r.json()["candidates"][0]["content"]["parts"]
-        return "".join(p.get("text", "") for p in parts).strip()
-    key = os.environ.get("DEEPSEEK_API_KEY")
-    if key:
-        r = requests.post(
-            "https://api.deepseek.com/chat/completions",
-            headers={"Authorization": f"Bearer {key}"},
-            json={
-                "model": "deepseek-chat",
-                "max_tokens": max_tokens,
-                "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-            },
-            timeout=90,
-        )
-        r.raise_for_status()
-        return r.json()["choices"][0]["message"]["content"].strip()
+class AIError(Exception):
+    """The AI service failed (bad key, quota, wrong model, unreadable reply). The article itself is fine."""
+
+
+def _gemini(system, user, max_tokens, json_mode):
+    model = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
+    cfg = {"maxOutputTokens": max(max_tokens, 2048), "temperature": 0.3}
+    if json_mode:
+        cfg["responseMimeType"] = "application/json"
+    if "2.5-flash" in model:
+        cfg["thinkingConfig"] = {"thinkingBudget": 0}  # no hidden 'thinking' tokens, just the answer
+    r = requests.post(
+        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+        headers={"x-goog-api-key": os.environ["GEMINI_API_KEY"]},
+        json={
+            "systemInstruction": {"parts": [{"text": system}]},
+            "contents": [{"role": "user", "parts": [{"text": user}]}],
+            "generationConfig": cfg,
+        },
+        timeout=90,
+    )
+    if not r.ok:
+        raise RuntimeError(f"HTTP {r.status_code} (model {model}): {r.text[:250]}")
+    parts = r.json()["candidates"][0]["content"]["parts"]
+    return "".join(p.get("text", "") for p in parts).strip()
+
+
+def _deepseek(system, user, max_tokens, json_mode):
+    r = requests.post(
+        "https://api.deepseek.com/chat/completions",
+        headers={"Authorization": f"Bearer {os.environ['DEEPSEEK_API_KEY']}"},
+        json={
+            "model": "deepseek-chat",
+            "max_tokens": max_tokens,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+        },
+        timeout=90,
+    )
+    if not r.ok:
+        raise RuntimeError(f"HTTP {r.status_code}: {r.text[:250]}")
+    return r.json()["choices"][0]["message"]["content"].strip()
+
+
+def _claude(system, user, max_tokens, json_mode):
     import anthropic
     client = anthropic.Anthropic()
     msg = client.messages.create(
@@ -80,6 +86,30 @@ def ask_claude(system, user, max_tokens=700, json_mode=False):
         messages=[{"role": "user", "content": user}],
     )
     return msg.content[0].text.strip()
+
+
+def ask_claude(system, user, max_tokens=700, json_mode=False):
+    """AI call with automatic fallback: Gemini -> DeepSeek -> Claude.
+    Only providers whose key is set are used; if one fails, the next is tried."""
+    chain = []
+    if os.environ.get("GEMINI_API_KEY"):
+        chain.append(("Gemini", _gemini))
+    if os.environ.get("DEEPSEEK_API_KEY"):
+        chain.append(("DeepSeek", _deepseek))
+    if os.environ.get("ANTHROPIC_API_KEY") or not chain:
+        chain.append(("Claude", _claude))
+    errors = []
+    for name, fn in chain:
+        try:
+            out = fn(system, user, max_tokens, json_mode)
+            if not out:
+                raise RuntimeError("empty reply")
+            if errors:
+                print(f"AI fallback: {'; '.join(errors)} -> used {name}")
+            return out
+        except Exception as e:
+            errors.append(f"{name} failed: {type(e).__name__}: {str(e)[:200]}")
+    raise AIError(" | ".join(errors))
 
 
 def to_bangla(title, body):
@@ -110,7 +140,10 @@ def to_bangla(title, body):
     )
     out = ask_claude(system, f"Title: {title}\n\nText: {body[:3000]}", max_tokens=900, json_mode=True)
     out = re.sub(r"^```(?:json)?|```$", "", out.strip()).strip()
-    return json.loads(out)
+    try:
+        return json.loads(out)
+    except Exception:
+        raise AIError(f"AI reply was not valid JSON: {out[:200]!r}")
 
 
 # ---------- fonts ----------
