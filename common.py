@@ -32,8 +32,30 @@ def save_state(s):
         json.dump(s, f, indent=1)
 
 
-def ask_claude(system, user, max_tokens=700):
-    """Uses DeepSeek if DEEPSEEK_API_KEY is set, otherwise Claude."""
+def ask_claude(system, user, max_tokens=700, json_mode=False):
+    """AI call. Order: Gemini (GEMINI_API_KEY) -> DeepSeek (DEEPSEEK_API_KEY) -> Claude."""
+    gkey = os.environ.get("GEMINI_API_KEY")
+    if gkey:
+        model = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+        cfg = {"maxOutputTokens": max(max_tokens, 2048), "temperature": 0.3}
+        if json_mode:
+            cfg["responseMimeType"] = "application/json"
+        if "2.5-flash" in model:
+            cfg["thinkingConfig"] = {"thinkingBudget": 0}  # no hidden 'thinking' tokens, just the answer
+        r = requests.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+            headers={"x-goog-api-key": gkey},
+            json={
+                "systemInstruction": {"parts": [{"text": system}]},
+                "contents": [{"role": "user", "parts": [{"text": user}]}],
+                "generationConfig": cfg,
+            },
+            timeout=90,
+        )
+        if not r.ok:
+            raise RuntimeError(f"Gemini error {r.status_code}: {r.text[:300]}")
+        parts = r.json()["candidates"][0]["content"]["parts"]
+        return "".join(p.get("text", "") for p in parts).strip()
     key = os.environ.get("DEEPSEEK_API_KEY")
     if key:
         r = requests.post(
@@ -63,8 +85,15 @@ def ask_claude(system, user, max_tokens=700):
 def to_bangla(title, body):
     system = (
         "You are a Bangla news editor for a Facebook page for Bangladeshis living in Singapore. "
-        "Translate the news into natural, simple, accurate Bangla. Never merge facts: if a price is given, say it is a starting price (\u09a5\u09c7\u0995\u09c7) and only for the route/item the article says. Keep names of places/organisations "
-        "in English if that is how Bangladeshis commonly read them. Do not add facts not in the text. "
+        "Translate the news into natural, simple, accurate Bangla. Never merge facts: if a price is given, say it is a starting price (\u09a5\u09c7\u0995\u09c7) and only for the route/item the article says. "
+        "NAMES: never translate or guess a Bangla word for a place, person, company, MRT station, agency or product name. "
+        "Write it in English exactly as in the article (e.g. Holland Village, Jurong, Mothership) or as a plain phonetic Bangla spelling "
+        "(e.g. \u09b9\u09b2\u09cd\u09af\u09be\u09a8\u09cd\u09a1 \u09ad\u09bf\u09b2\u09c7\u099c). If unsure, keep it in English. "
+        "WORDS: use exact Bangla terms: haze = \u09a7\u09cb\u0981\u09af\u09bc\u09be\u09b6\u09be (not \u0995\u09c1\u09af\u09bc\u09be\u09b6\u09be, which is fog), "
+        "cobbler/shoe repairer = \u09ae\u09c1\u099a\u09bf, work pass = \u0993\u09af\u09bc\u09be\u09b0\u09cd\u0995 \u09aa\u09be\u09b8, dormitory = \u09a1\u09b0\u09ae\u09bf\u099f\u09b0\u09bf, "
+        "foreign worker = \u09ac\u09bf\u09a6\u09c7\u09b6\u09bf \u0995\u09b0\u09cd\u09ae\u09c0, grant/subsidy = \u09ad\u09b0\u09cd\u09a4\u09c1\u0995\u09bf/\u0985\u09a8\u09c1\u09a6\u09be\u09a8. "
+        "Use the exact word for the job or thing named; never a loosely similar one. "
+        "Every fact in the headline and detail (place, number, job, date) must appear in the text. Do not add facts not in the text. "
         'Reply ONLY with JSON: {"headline": "punchy Bangla headline that makes people curious but is 100% accurate, '
         'max 60 chars, may end with !", '
         '"subline": "one Bangla sentence, max 110 chars, ends with \u0964", '
@@ -79,7 +108,7 @@ def to_bangla(title, body):
         '"image_prompt": "English prompt for an AI image: realistic documentary-style scene that illustrates the topic '
         '(places, objects, crowds from far away). NO real people, NO faces of public figures, NO text, NO logos, NO flags, max 40 words"}'
     )
-    out = ask_claude(system, f"Title: {title}\n\nText: {body[:3000]}")
+    out = ask_claude(system, f"Title: {title}\n\nText: {body[:3000]}", max_tokens=900, json_mode=True)
     out = re.sub(r"^```(?:json)?|```$", "", out.strip()).strip()
     return json.loads(out)
 
