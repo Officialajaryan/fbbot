@@ -1,7 +1,7 @@
 """Singapore news -> Bangla card -> posted straight to Facebook (no Telegram approval)."""
 import os, re, random
 import feedparser
-from common import load_state, save_state, prepare, post_card, tg_say, tg_notify, NoImage, clean_url
+from common import load_state, save_state, prepare, post_card, tg_say, tg_notify, NoImage, AIError, clean_url
 
 POSTS_PER_RUN = 1
 MAX_TRIES = 10  # how many articles to check per run
@@ -48,7 +48,8 @@ def main():
                 pool.append((name, e))
     random.shuffle(pool)  # variety among equal scores
     pool.sort(key=lambda p: -score(p[1].get("title", ""), clean(p[1].get("summary", ""))))
-    done = tries = 0
+    done = tries = ai_fails = 0
+    last_err = ""
     for name, e in pool:
         if done >= POSTS_PER_RUN or tries >= MAX_TRIES:
             break
@@ -66,6 +67,13 @@ def main():
                 tg_notify(owner, card["path"],
                           f"✅ Posted to Facebook\n\n{card['caption'].splitlines()[0]}\n\n"
                           f"Facebook: https://www.facebook.com/{post_id}\nSource: {clean_url(e.link)}")
+        except AIError as ex:
+            # the AI service failed, not the article: do NOT mark it as posted, and stop early if it keeps failing
+            ai_fails += 1
+            last_err = str(ex)
+            print("AI error (article kept for next run):", e.title, "-", ex)
+            if ai_fails >= 2:
+                break
         except NoImage as ex:
             print("No image, trying next article:", e.title, "-", ex)  # not marked, may retry later
         except Exception as ex:
@@ -77,7 +85,10 @@ def main():
         owner = os.environ.get("TG_OWNER_ID")
         if owner and os.environ.get("TG_BOT_TOKEN"):
             try:
-                tg_say(owner, "⚠️ News run finished but nothing was posted (no new Singapore article with a photo).")
+                if ai_fails:
+                    tg_say(owner, "⚠️ Nothing posted: the AI step failed.\n" + last_err[:600])
+                else:
+                    tg_say(owner, "⚠️ News run finished but nothing was posted (no new Singapore article with a photo).")
             except Exception:
                 pass
 
