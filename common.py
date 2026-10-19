@@ -68,7 +68,10 @@ def to_bangla(title, body):
         'Reply ONLY with JSON: {"headline": "punchy Bangla headline that makes people curious but is 100% accurate, '
         'max 60 chars, may end with !", '
         '"subline": "one Bangla sentence, max 110 chars, ends with \u0964", '
-        '"highlight": "1 to 3 key words copied EXACTLY from your headline (numbers, money, the main subject) to colour yellow", '
+        '"detail": "OPTIONAL white text shown under the headline on the picture. Use it for the key fact: one Bangla sentence, '
+        'max 90 chars, ends with \u0964. Use an empty string if the headline alone says everything (e.g. a big money amount '
+        'or announcement). For an interesting fact you may set headline to \u0986\u09aa\u09a8\u09bf \u0995\u09bf \u099c\u09be\u09a8\u09c7\u09a8? and put the fact in detail", '
+        '"bd_flag": "true if the news is about foreign workers, migrants, work passes, dormitories, remittance or Bangladesh; otherwise false", '
         '"country": "sg", '
         '"relevant": "true only if the news is about Singapore: its people, government, money, jobs, pay, work passes, '
         'MOM rules, cost of living, housing, transport, schools, health, safety, weather, or Singapore-Bangladesh ties. '
@@ -213,7 +216,23 @@ def _flag(cc):
         r = requests.get(f"https://flagcdn.com/w160/{cc}.png", timeout=15)
         return Image.open(io.BytesIO(r.content)).convert("RGB").resize((96, 64))
     except Exception:
+        return _flag_fallback(cc)
+
+
+def _flag_fallback(cc):
+    """simple drawn flags, used if flagcdn.com can't be reached"""
+    f = Image.new("RGB", (96, 64), "white")
+    fd = ImageDraw.Draw(f)
+    if cc == "bd":
+        fd.rectangle([0, 0, 96, 64], fill="#006a4e")
+        fd.ellipse([30, 14, 66, 50], fill="#f42a41")
+    elif cc == "sg":
+        fd.rectangle([0, 0, 96, 32], fill="#ef3340")
+        fd.ellipse([8, 5, 32, 29], fill="white")
+        fd.ellipse([14, 5, 38, 29], fill="#ef3340")
+    else:
         return None
+    return f
 
 
 def _cover_at(img, w, h, fy=0.3):
@@ -238,84 +257,104 @@ def _draw_words(d, words, size, y, W, base, hi_words):
         cx += space
 
 
-def make_card(headline, subline, photo=None, country="sg", path="card.png", ai_label=False,
-              credit="", highlight=""):
-    """1080x1350 (4:5). Big photo on top, red tag, white headline with yellow key words,
-    footer with Facebook QR."""
-    W, H, PH = 1080, 1350, 800
-    PAD = 50
-    img = Image.new("RGB", (W, H), "#0a0a0a")
-    if photo is None:  # fallback background: dark blue gradient
-        photo = Image.new("RGB", (W, PH))
-        pd = ImageDraw.Draw(photo)
-        for y in range(PH):
-            pd.line([(0, y), (W, y)], fill=(18, 30 + y // 18, 60 + y // 12))
-    img.paste(_cover_at(photo, W, PH, 0.3), (0, 0))
+GREEN = "#2ee66b"
+PANEL = "#0a0a0a"
 
-    # top shade (for logo/flags) + long bottom fade into the dark panel
-    shade = Image.new("RGBA", (W, PH), (0, 0, 0, 0))
-    sd = ImageDraw.Draw(shade)
-    for y in range(PH):
-        top = max(0.0, 1 - y / 230) * 0.55
-        bot = max(0.0, (y - PH * 0.50) / (PH * 0.50)) ** 1.4
-        sd.line([(0, y), (W, y)], fill=(0, 0, 0, int(255 * min(1.0, top + bot))))
-    img.paste(Image.alpha_composite(img.crop((0, 0, W, PH)).convert("RGBA"), shade).convert("RGB"), (0, 0))
+
+def _brand_parts(name):
+    """'ARYAN BY' -> ('ARYAN', 'BY'): the first part is drawn big, 'BY ...' small."""
+    up = f" {name} "
+    i = up.upper().find(" BY ")
+    if i > 0:
+        return name[:i - 1].strip(), name[i:].strip()
+    return name, ""
+
+
+def make_card(headline, detail="", photo=None, country="sg", path="card.png", ai_label=False,
+              credit="", highlight="", bd_flag=True):
+    """1080x1350 (4:5). Photo on top; a black rounded panel at the bottom whose height follows
+    the text. Panel text = big GREEN headline, then optional WHITE detail lines.
+    Top-left: red bar + brand + small QR + 'Follow us on Facebook'. Top-right: BD / SG flags."""
+    W, H = 1080, 1350
+    PAD, R = 44, 44
+    img = Image.new("RGB", (W, H), PANEL)
     d = ImageDraw.Draw(img)
 
-    # brand (top-left) + flags (top-right)
-    d.rectangle([40, 42, 46, 92], fill="#dc2626")
-    _draw_line(d, PAGE_NAME.split(), 46, 38, W, "white", x=62)
-    x = W - 40 - 96
-    for cc in [c for c in (country, "bd") if c]:
-        f = _flag(cc.lower())
-        if f:
-            d.rectangle([x - 3, 47, x + 99, 114], fill="white")
-            img.paste(f, (x, 50))
-            x -= 110
-
-    # red tag
-    tag, tsz = "সিঙ্গাপুর নিউজ", 36
-    tw = int(_width_words(d, tag, tsz))
-    ty = PH - 70
-    d.rounded_rectangle([PAD, ty, PAD + tw + 56, ty + 66], radius=33, fill="#dc2626")
-    _draw_line(d, tag.split(), tsz, ty + 11, W, "white", x=PAD + 28)
-
-    # photo credit / AI label (right of the tag)
-    note = "AI-generated illustration" if ai_label else (f"Photo: {credit}" if credit else "")
-    if note:
-        lf = _lat(18)
-        d.text((W - PAD - d.textlength(note, font=lf), ty + 24), note, font=lf, fill="#cbd5e1")
-
-    # headline + subline
-    hi = {w for w in (highlight or "").replace(",", " ").split()}
-    top, bottom = PH + 20, 1195
-    avail = bottom - top
-    for size in range(92, 44, -3):
-        lh = int(size * 1.32)
-        ssz = max(30, int(size * 0.5))
-        slh = int(ssz * 1.45)
-        hl = _wrap(d, headline, size, W - 2 * PAD - 20)
-        sl = _wrap(d, subline, ssz, W - 2 * PAD - 20)
-        if len(hl) * lh + len(sl) * slh + 20 <= avail:
+    # ---- fit the text; the panel height follows the amount of text ----
+    maxw = W - 2 * PAD
+    min_p, max_p, vpad = int(H * 0.34), int(H * 0.47), 56
+    top_size = 80 if detail else 108
+    for size in range(top_size, 43, -2):
+        lh = int(size * 1.3)
+        hl = _wrap(d, headline, size, maxw)
+        dl = _wrap(d, detail, size, maxw) if detail else []
+        total = (len(hl) + len(dl)) * lh
+        if len(hl) <= 4 and len(hl) + len(dl) <= 5 and total + 2 * vpad <= max_p:
             break
-    y = top + (avail - (len(hl) * lh + len(sl) * slh + 20)) // 2
-    for ln in hl:
-        _draw_words(d, ln, size, y, W, "white", hi)
-        y += lh
-    y += 20
-    for ln in sl:
-        _draw_line(d, ln, ssz, y, W, "#aeb7c2")
-        y += slh
+    panel_h = max(min_p, min(max_p, total + 2 * vpad))
+    PH = H - panel_h
 
-    # footer: follow text (left) + QR (right)
-    d.line([PAD, 1222, W - PAD, 1222], fill="#26262b", width=2)
-    _draw_line(d, "ফেসবুকে ফলো করুন".split(), 36, 1250, W, "white", x=PAD)
-    _draw_line(d, PAGE_NAME.split(), 30, 1300, W, "#facc15", x=PAD)
+    # ---- photo (runs a little under the rounded panel corners) ----
+    if photo is None:  # fallback background: dark blue gradient
+        photo = Image.new("RGB", (W, PH + R))
+        pd = ImageDraw.Draw(photo)
+        for y in range(PH + R):
+            pd.line([(0, y), (W, y)], fill=(18, 30 + y // 18, 60 + y // 12))
+    img.paste(_cover_at(photo, W, PH + R, 0.3), (0, 0))
+
+    # light top shade so brand / QR / flags stay readable on any photo
+    shade = Image.new("RGBA", (W, 260), (0, 0, 0, 0))
+    sd = ImageDraw.Draw(shade)
+    for y in range(260):
+        sd.line([(0, y), (W, y)], fill=(0, 0, 0, int(255 * 0.45 * (1 - y / 260))))
+    top = img.crop((0, 0, W, 260)).convert("RGBA")
+    img.paste(Image.alpha_composite(top, shade).convert("RGB"), (0, 0))
+    d = ImageDraw.Draw(img)
+
+    # ---- rounded black panel ----
+    d.rounded_rectangle([0, PH, W, H + R], radius=R, fill=PANEL)
+
+    # ---- brand: red bar + ARYAN (big) + BY (small) ----
+    d.rectangle([40, 38, 44, 82], fill="#dc2626")
+    big, small = _brand_parts(PAGE_NAME)
+    bf = _lat(34)
+    d.text((58, 76), big, font=bf, fill="white", anchor="ls")
+    if small:
+        d.text((58 + d.textlength(big, font=bf) + 8, 76), small, font=_lat(16), fill="#e5e7eb", anchor="ls")
+
+    # ---- QR + follow text under the brand ----
     page_url = os.environ.get("FB_PAGE_URL", "")
     if page_url:
-        q = qrcode.make(page_url, border=1).convert("RGB").resize((96, 96))
-        d.rectangle([W - PAD - 104, 1236, W - PAD, 1236 + 104], fill="white")
-        img.paste(q, (W - PAD - 100, 1240))
+        q = qrcode.make(page_url, border=1).convert("RGB").resize((106, 106))
+        d.rectangle([34, 96, 34 + 114, 96 + 114], fill="white")
+        img.paste(q, (38, 100))
+        d.text((34, 232), "Follow us on Facebook", font=_lat(15), fill="#facc15", anchor="ls")
+
+    # ---- flags (top-right): BD on the left, country on the right ----
+    x = W - PAD - 88
+    for cc in [country, "bd" if bd_flag else None]:
+        if not cc:
+            continue
+        f = _flag(cc.lower())
+        if f:
+            f = f.resize((88, 58))
+            d.rectangle([x - 2, 40, x + 89, 101], fill="white")
+            img.paste(f, (x, 42))
+            x -= 100
+
+    if ai_label:
+        note = "AI-generated illustration"
+        lf = _lat(20)
+        d.text((W - PAD - d.textlength(note, font=lf), PH - 30), note, font=lf, fill="#e2e8f0")
+
+    # ---- text: green headline, then white detail, centred in the panel ----
+    y = PH + (panel_h - total) // 2
+    for ln in hl:
+        _draw_line(d, ln, size, y, W, GREEN)
+        y += lh
+    for ln in dl:
+        _draw_line(d, ln, size, y, W, "white")
+        y += lh
     img.save(path)
     return path
 
@@ -389,8 +428,9 @@ def prepare(title, body, url, require_relevant=False, require_image=False, sourc
             break
     if photo is None and require_image:
         raise NoImage("no image found from article or AI")
-    path = make_card(t["headline"], t["subline"], photo, t.get("country") or "sg",
-                     ai_label=is_ai, credit=source, highlight=t.get("highlight", ""))
+    path = make_card(t["headline"], (t.get("detail") or "").strip(), photo, t.get("country") or "sg",
+                     ai_label=is_ai, credit=source,
+                     bd_flag=str(t.get("bd_flag", "true")).lower() in ("true", "yes"))
     caption = (f'{t["headline"]}\n\n{t["subline"]}\n\n'
                f"💬 আপনার মতামত কমেন্টে জানান\n📤 প্রবাসী ভাইদের সাথে শেয়ার করুন\n\n{HASHTAGS}")
     return {"path": path, "caption": caption, "url": url, "has_photo": photo is not None}
