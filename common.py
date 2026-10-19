@@ -62,14 +62,19 @@ def ask_claude(system, user, max_tokens=700):
 
 def to_bangla(title, body):
     system = (
-        "You are a Bangla news editor for a Facebook page. Translate the news into natural, "
-        "simple, accurate Bangla. Keep names of places/organisations in English if that is how "
-        "Bangladeshis commonly read them. Do not add facts not in the text. "
-        'Reply ONLY with JSON: {"headline": "punchy Bangla headline, max 60 chars, may end with !", '
-        '"subline": "one Bangla sentence, max 110 chars, ends with ।", '
-        '"country": "sg if the news is about Singapore, otherwise empty", '
-        '"relevant": "true only if the news is about Singapore, or Bangladesh, or directly affects Bangladeshis living or working in Singapore (work passes, MOM rules, migrant workers, remittance, Singapore-Bangladesh relations). Otherwise false", '
-        '"image_prompt": "English prompt for an AI image: realistic documentary-style scene that illustrates the topic (places, objects, crowds from far away). NO real people, NO faces of public figures, NO text, NO logos, NO flags, max 40 words"}'
+        "You are a Bangla news editor for a Facebook page for Bangladeshis living in Singapore. "
+        "Translate the news into natural, simple, accurate Bangla. Keep names of places/organisations "
+        "in English if that is how Bangladeshis commonly read them. Do not add facts not in the text. "
+        'Reply ONLY with JSON: {"headline": "punchy Bangla headline that makes people curious but is 100% accurate, '
+        'max 60 chars, may end with !", '
+        '"subline": "one Bangla sentence, max 110 chars, ends with \u0964", '
+        '"highlight": "1 to 3 key words copied EXACTLY from your headline (numbers, money, the main subject) to colour yellow", '
+        '"country": "sg", '
+        '"relevant": "true only if the news is about Singapore: its people, government, money, jobs, pay, work passes, '
+        'MOM rules, cost of living, housing, transport, schools, health, safety, weather, or Singapore-Bangladesh ties. '
+        'False for news about other countries, sports results, celebrity gossip or crime with no effect on residents", '
+        '"image_prompt": "English prompt for an AI image: realistic documentary-style scene that illustrates the topic '
+        '(places, objects, crowds from far away). NO real people, NO faces of public figures, NO text, NO logos, NO flags, max 40 words"}'
     )
     out = ask_claude(system, f"Title: {title}\n\nText: {body[:3000]}")
     out = re.sub(r"^```(?:json)?|```$", "", out.strip()).strip()
@@ -207,42 +212,55 @@ def _flag(cc):
         return None
 
 
-def make_card(headline, subline, photo=None, country="", path="card.png", ai_label=False):
-    W, H, PH, PY = 1080, 1280, 680, 630
-    img = Image.new("RGB", (W, H), "#0a0a0a")
-    if photo is None:  # fallback background
-        photo = Image.new("RGB", (W, PH), "#1e293b")
-    img.paste(_cover(photo, W, PH), (0, 0))
+def _cover_at(img, w, h, fy=0.3):
+    """cover-crop; fy 0 = keep top, 1 = keep bottom (0.3 keeps faces, which are usually high up)"""
+    sc = max(w / img.width, h / img.height)
+    img = img.resize((int(img.width * sc) + 1, int(img.height * sc) + 1))
+    l, t = (img.width - w) // 2, int((img.height - h) * fy)
+    return img.crop((l, t, l + w, t + h))
 
-    # darken photo (top + bottom fade)
+
+def _draw_words(d, words, size, y, W, base, hi_words):
+    """one centred line; words in hi_words are yellow"""
+    space = d.textlength(" ", font=_bn(size))
+    total = sum(_wlen(d, w, size) for w in words) + space * (len(words) - 1)
+    cx = (W - total) / 2
+    for w in words:
+        col = "#ffd60a" if w.strip("!?.,।:;\"'") in hi_words else base
+        for t, lat in _runs(w):
+            f = _lat(size) if lat else _bn(size)
+            d.text((cx, y + size), t, font=f, fill=col, anchor="ls")
+            cx += d.textlength(t, font=f)
+        cx += space
+
+
+def make_card(headline, subline, photo=None, country="sg", path="card.png", ai_label=False,
+              credit="", highlight=""):
+    """1080x1350 (4:5). Big photo on top, red tag, white headline with yellow key words,
+    footer with Facebook QR."""
+    W, H, PH = 1080, 1350, 800
+    PAD = 50
+    img = Image.new("RGB", (W, H), "#0a0a0a")
+    if photo is None:  # fallback background: dark blue gradient
+        photo = Image.new("RGB", (W, PH))
+        pd = ImageDraw.Draw(photo)
+        for y in range(PH):
+            pd.line([(0, y), (W, y)], fill=(18, 30 + y // 18, 60 + y // 12))
+    img.paste(_cover_at(photo, W, PH, 0.3), (0, 0))
+
+    # top shade (for logo/flags) + long bottom fade into the dark panel
     shade = Image.new("RGBA", (W, PH), (0, 0, 0, 0))
     sd = ImageDraw.Draw(shade)
     for y in range(PH):
-        a = int(max(0, (y - PH * 0.45) / (PH * 0.55)) * 235) + int(max(0, 1 - y / 220) * 110)
-        sd.line([(0, y), (W, y)], fill=(0, 0, 0, min(a, 255)))
+        top = max(0.0, 1 - y / 230) * 0.55
+        bot = max(0.0, (y - PH * 0.50) / (PH * 0.50)) ** 1.4
+        sd.line([(0, y), (W, y)], fill=(0, 0, 0, int(255 * min(1.0, top + bot))))
     img.paste(Image.alpha_composite(img.crop((0, 0, W, PH)).convert("RGBA"), shade).convert("RGB"), (0, 0))
-
     d = ImageDraw.Draw(img)
-    d.rounded_rectangle([0, PY, W, H + 80], radius=56, fill="#0a0a0a")
 
-    if ai_label:
-        lf = _lat(17)
-        tw = d.textlength("AI-generated illustration", font=lf)
-        d.text((W - tw - 30, PY - 34), "AI-generated illustration", font=lf, fill="#cbd5e1")
-
-    # logo
+    # brand (top-left) + flags (top-right)
     d.rectangle([40, 42, 46, 92], fill="#dc2626")
     _draw_line(d, PAGE_NAME.split(), 46, 38, W, "white", x=62)
-
-    # QR
-    page_url = os.environ.get("FB_PAGE_URL", "")
-    if page_url:
-        q = qrcode.make(page_url, border=1).convert("RGB").resize((116, 116))
-        d.rectangle([34, 112, 34 + 124, 112 + 124], fill="white")
-        img.paste(q, (38, 116))
-        d.text((34, 244), "Follow us on Facebook", font=_lat(15), fill="#facc15")
-
-    # flags (Bangladesh + related country)
     x = W - 40 - 96
     for cc in [c for c in (country, "bd") if c]:
         f = _flag(cc.lower())
@@ -251,24 +269,57 @@ def make_card(headline, subline, photo=None, country="", path="card.png", ai_lab
             img.paste(f, (x, 50))
             x -= 110
 
-    # text block
-    top, bottom = PY + 70, H - 50
+    # red tag
+    tag, tsz = "সিঙ্গাপুর নিউজ", 36
+    tw = int(_width_words(d, tag, tsz))
+    ty = PH - 70
+    d.rounded_rectangle([PAD, ty, PAD + tw + 56, ty + 66], radius=33, fill="#dc2626")
+    _draw_line(d, tag.split(), tsz, ty + 11, W, "white", x=PAD + 28)
+
+    # photo credit / AI label (right of the tag)
+    note = "AI-generated illustration" if ai_label else (f"Photo: {credit}" if credit else "")
+    if note:
+        lf = _lat(18)
+        d.text((W - PAD - d.textlength(note, font=lf), ty + 24), note, font=lf, fill="#cbd5e1")
+
+    # headline + subline
+    hi = {w for w in (highlight or "").replace(",", " ").split()}
+    top, bottom = PH + 20, 1195
     avail = bottom - top
-    for size in range(84, 40, -3):
-        lh = int(size * 1.4)
-        hl = _wrap(d, headline, size, W - 110)
-        sl = _wrap(d, subline, int(size * 0.92), W - 90)
-        if (len(hl) + len(sl)) * lh <= avail:
+    for size in range(92, 44, -3):
+        lh = int(size * 1.32)
+        ssz = max(30, int(size * 0.5))
+        slh = int(ssz * 1.45)
+        hl = _wrap(d, headline, size, W - 2 * PAD - 20)
+        sl = _wrap(d, subline, ssz, W - 2 * PAD - 20)
+        if len(hl) * lh + len(sl) * slh + 20 <= avail:
             break
-    y = top + (avail - (len(hl) + len(sl)) * lh) // 2
+    y = top + (avail - (len(hl) * lh + len(sl) * slh + 20)) // 2
     for ln in hl:
-        _draw_line(d, ln, size, y, W, "#39e75f")
+        _draw_words(d, ln, size, y, W, "white", hi)
         y += lh
+    y += 20
     for ln in sl:
-        _draw_line(d, ln, int(size * 0.92), y, W, "white")
-        y += lh
+        _draw_line(d, ln, ssz, y, W, "#aeb7c2")
+        y += slh
+
+    # footer: follow text (left) + QR (right)
+    d.line([PAD, 1222, W - PAD, 1222], fill="#26262b", width=2)
+    _draw_line(d, "ফেসবুকে ফলো করুন".split(), 36, 1250, W, "white", x=PAD)
+    _draw_line(d, PAGE_NAME.split(), 30, 1300, W, "#facc15", x=PAD)
+    page_url = os.environ.get("FB_PAGE_URL", "")
+    if page_url:
+        q = qrcode.make(page_url, border=1).convert("RGB").resize((96, 96))
+        d.rectangle([W - PAD - 104, 1236, W - PAD, 1236 + 104], fill="white")
+        img.paste(q, (W - PAD - 100, 1240))
     img.save(path)
     return path
+
+
+def _width_words(d, text, size):
+    space = d.textlength(" ", font=_bn(size))
+    ws = text.split()
+    return sum(_wlen(d, w, size) for w in ws) + space * (len(ws) - 1)
 
 
 def _fb_check(r):
@@ -311,15 +362,18 @@ class NoImage(Exception):
     pass
 
 
-def prepare(title, body, url, require_relevant=False, require_image=False):
+HASHTAGS = "#Singapore #সিঙ্গাপুর #প্রবাসী #SingaporeNews"
+
+
+def prepare(title, body, url, require_relevant=False, require_image=False, source=""):
     """Make the card + caption without posting.
-    Image order: AI image -> article image (or reverse if IMAGE_MODE=article)."""
+    Image order: real article photo -> AI image (set IMAGE_MODE=ai to reverse)."""
     t = to_bangla(title, body)
     if require_relevant and str(t.get("relevant")).lower() not in ("true", "yes"):
-        raise ValueError("not about Singapore/Bangladesh, skipped")
-    mode = os.environ.get("IMAGE_MODE", "ai")  # "ai" or "article"
+        raise ValueError("not about Singapore, skipped")
+    mode = os.environ.get("IMAGE_MODE", "article")  # "article" or "ai"
     photo, is_ai = None, False
-    order = ["ai", "article"] if mode == "ai" else ["article", "ai"]
+    order = ["article", "ai"] if mode == "article" else ["ai", "article"]
     for src in order:
         if src == "ai":
             photo = get_ai_image(t.get("image_prompt") or title)
@@ -330,10 +384,12 @@ def prepare(title, body, url, require_relevant=False, require_image=False):
         if photo is not None:
             break
     if photo is None and require_image:
-        raise NoImage("no image found from AI or article")
-    path = make_card(t["headline"], t["subline"], photo, t.get("country", ""), ai_label=is_ai)
-    return {"path": path, "caption": f'{t["headline"]}\n\n{t["subline"]}',
-            "url": url, "has_photo": photo is not None}
+        raise NoImage("no image found from article or AI")
+    path = make_card(t["headline"], t["subline"], photo, t.get("country") or "sg",
+                     ai_label=is_ai, credit=source, highlight=t.get("highlight", ""))
+    caption = (f'{t["headline"]}\n\n{t["subline"]}\n\n'
+               f"💬 আপনার মতামত কমেন্টে জানান\n📤 প্রবাসী ভাইদের সাথে শেয়ার করুন\n\n{HASHTAGS}")
+    return {"path": path, "caption": caption, "url": url, "has_photo": photo is not None}
 
 
 def publish(title, body, source_name, url):
@@ -368,6 +424,21 @@ def tg_preview(chat, c, state=None):
         ).json()
     if not r.get("ok"):
         raise RuntimeError(f"Telegram error: {r}")
+
+
+def tg_notify(chat, path, caption):
+    """Send the card to Telegram as a plain copy (no buttons). Never raises."""
+    try:
+        with open(path, "rb") as f:
+            r = requests.post(
+                f"{_tg()}/sendPhoto",
+                data={"chat_id": chat, "caption": caption[:1024]},
+                files={"photo": f}, timeout=60,
+            ).json()
+        if not r.get("ok"):
+            print("Telegram notify failed:", r)
+    except Exception as e:
+        print("Telegram notify error:", e)
 
 
 def tg_download(file_id, path="approved.png"):
