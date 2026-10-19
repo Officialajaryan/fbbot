@@ -63,7 +63,7 @@ def ask_claude(system, user, max_tokens=700):
 def to_bangla(title, body):
     system = (
         "You are a Bangla news editor for a Facebook page for Bangladeshis living in Singapore. "
-        "Translate the news into natural, simple, accurate Bangla. Keep names of places/organisations "
+        "Translate the news into natural, simple, accurate Bangla. Never merge facts: if a price is given, say it is a starting price (\u09a5\u09c7\u0995\u09c7) and only for the route/item the article says. Keep names of places/organisations "
         "in English if that is how Bangladeshis commonly read them. Do not add facts not in the text. "
         'Reply ONLY with JSON: {"headline": "punchy Bangla headline that makes people curious but is 100% accurate, '
         'max 60 chars, may end with !", '
@@ -102,10 +102,14 @@ def _lat(size):
     return _bn(size)
 
 
+_BN = "\u0964\u0965\u0980-\u09ff\u200c\u200d"  # Bengali block + joiners (needed inside Bangla words)
+
+
 def _runs(word):
-    """split a word into (text, is_latin) runs"""
-    return [(m, bool(re.match(r"[A-Za-z0-9]", m)))
-            for m in re.findall(r"[A-Za-z0-9]+|[^A-Za-z0-9]+", word)]
+    """split a word into (text, is_latin) runs. Only Bangla characters use the Bangla
+    font; everything else ($ % & - + digits, letters ...) uses the Latin font."""
+    return [(m, not re.match(f"[{_BN}]", m))
+            for m in re.findall(f"[{_BN}]+|[^{_BN}]+", word)]
 
 
 def _wlen(d, word, size):
